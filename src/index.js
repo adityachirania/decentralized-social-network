@@ -1,333 +1,398 @@
 'use strict'
 
-const IPFS = require('ipfs')
-const OrbitDB = require('orbit-db')
-const Orbit = require('orbit_')
+const IPFS = require('ipfs');
+const OrbitDB = require('orbit-db');
+const Orbit = require('orbit_');
+// const multiaddr = require('multiaddr')
+
+const initialization = require('./initialization');
+const utils = require('./utils');
 
 document.addEventListener('DOMContentLoaded', async() => {
-    const node = await IPFS.create({ repo: 'ipfs_repository' })
-    console.log('IPFS node is ready')
 
-    // Create OrbitDB instance
-    const orbitdb = await OrbitDB.createInstance(node)
+    const node = await initialization.createNode(IPFS);
+    console.log('IPFS node is ready');
 
-    /**
-     * Creating the orbit-db database:
-     * 
-     * const options = {
-     *  // Give write access to everyone
-     *  accessController: {
-     *     write: ['*'],
-     *  },
-     *  indexBy: 'peerID',
-     *  pin: true
-     * }
-     * 
-     * const db = await orbitdb.docs('uqsers_db', options)
-     */
+    const isNewProfile = await initialization.createRootFolder(node);
+    console.log('Root folder check completed');
 
-    const orbit = new Orbit(node)  // for orbit-chat
+    // Friend peer address list stored within root_folder, on a flat file
+    let friend_multiaddr_list = await initialization.loadFriendsList(node, isNewProfile);
 
-    let friend_multiaddr_list = []
+    const db = await initialization.connectToDB(node, OrbitDB);
+    console.log('Successfully connected to orbit-DB at address: ' + db.address.toString());
 
-    async function update_DB(new_root_hash) {
-
-        // Open connection to existing orbitDB database
-        const db = await orbitdb.open('/orbitdb/Qmd8TmZrWASypEp4Er9tgWP4kCNQnW4ncSnvjvyHQ3EVSU/first-database')
-        await db.load()  // load locally persisted data
+    if (isNewProfile) {
         
-        console.log('The address of the orbit-db is: ' + db.address.toString())
-        
-        // Getting our peerID
-        const nodeDetails = await Promise.resolve(node.id())
-        const myPeerId = nodeDetails.id
-
-        var record = await db.get(myPeerId)
-        record.root_hash = new_root_hash
-        
-        // Update the DB.
-        db.put(record)
-        .then(() => db.get(myPeerId))
-        .then((value) => {
-            console.log('The DB has been updated: ')
-            console.log(value)
-        })
-    }
-
-    async function create_root_folder() {
-
-        await node.files.mkdir('/root_folder').catch((err) => {
-            console.log('Root folder already created!')
-        });
-        await node.files.mkdir('/root_folder/public_profile').catch((err) => {
-            console.log('Public profile already created!')
-        });
-
-        console.log('Root folder and public profile created succesfully!')
-
-        // Getting our peerID
-        const nodeDetails = await Promise.resolve(node.id())
-        const myPeerId = nodeDetails.id
-        console.log(myPeerId)
+        await initialization.addDetailsToDB(node, db);
+        console.log('Added new user record in DB!');
 
     }
 
-    async function add_details_to_DB () {
-        // Getting our peerID
-        const nodeDetails = await Promise.resolve(node.id())
-        const myPeerId = nodeDetails.id
+    const orbit = await initialization.connectToChat(node, Orbit);
+    console.log("Connected to orbit-chat");
+    
+    // Remove this later
+    const Root_hash = await node.files.stat('/root_folder');
+    console.log('Your root folder hash is: ' + Root_hash.hash)
 
-        // Getting the hash of our root folder
-        const root = await node.files.stat('/root_folder');
-        console.log("root_folder hash:");
-        console.log(root.hash);
-        
-        /**
-         * To make sure Orbit-DB is fully replicated before user makes changes:
-         * https://github.com/orbitdb/orbit-db/blob/master/API.md#replicated
-        */
-
-        /**
-         * db.events.on('peer', (peer) => ... )
-         * Emitted when a new peer connects via ipfs pubsub. 
-         * peer is a string containing the id of the new peer
-         * https://github.com/orbitdb/orbit-db/blob/master/API.md#peer
-         */
-
-        // Add our data to DB.
-        db.put({ '_id': 223, 'peerID': myPeerId, public_key: 'test', root_hash: 'test', address: 'IPFS_address', username: 'krithik' })
-        .then(() => db.get(myPeerId))
-        .then((value) => console.log(value))
-    }
-
+    // Initialization phase over
+    
     async function add_data_to_public_profile() {
-        const filename = document.getElementById('filename').value
-        const filedata = document.getElementById('filedata').value
 
-        const files_added = await node.add({ path: '/root_folder/public_profile/' + filename, content: filedata }).catch((err) => {
-            console.log('Could not create file')
-            console.log(err)
+        // Extract the contents of the submission
+        const filename = document.getElementById('profile-filename').value
+        const info = document.getElementById('profile-info').value
+
+        // Ensure the fields weren't empty on submission
+        if (!(info) || !(filename)) {
+            alert("Please enter all fields before submitting.");
             return;
+        }
+    
+        // Save the data to public profile
+        await utils.addDataToPublicProfile(node, filename, info);
+
+        alert("Public Profile Updated.");
+
+    }
+
+    async function read_public_posts () {
+
+        // Extract the contents of the submission
+        var friend_peer_id = document.getElementById("read-public-posts-id").value;
+
+        // Ensure the fields weren't empty on submission
+        if (!(friend_peer_id)) {
+            alert("Please enter all values before submitting.");
+            return;
+        }
+
+        // TODO: Move to utils
+
+        // THE FOLDER CONTAINING PUBLIC POSTS IS CALLED 'public'
+
+        let file_path = '/ipfs/' + friend_root_hash + '/public/';
+        const files = await node.files.ls(file_path);
+
+        files.forEach(async(file) => {
+
+            console.log(file);
+            if (file.type == 0) {
+
+                const buf = await node.files.read('/root_folder/public/' + file.name);
+
+                // TODO: add to HTML instead of console.log()
+                console.log(buf.toString('utf8'));
+            }
+
         });
 
-        console.log('Added file:', files_added[0].path, files_added[0].hash)
-        const fileBuffer = await node.cat(files_added[0].hash)
-        console.log('Added file contents:', fileBuffer.toString())
+        document.getElementById('public-posts-list').style.display = 'block';
 
-        // Update root folder hash in the DB
-        const root = await node.files.stat('/root_folder');
-        await update_DB(root.hash)
     }
 
-    async function store() {
-        const peerInfos = await node.swarm.addrs();
-        console.log(peerInfos);
-
-        const toStore = document.getElementById('source').value
-        const result = await node.add(toStore)
-
-        for (const file of result) {
-            if (file && file.hash) {
-                console.log('successfully stored', file.hash)
-                await display(file.hash)
-            }
-        }
-    }
-
-    async function display(hash) {
-        const data = await node.cat(hash)
-
-        document.getElementById('hash').innerText = hash
-        document.getElementById('content').innerText = data
-        document.getElementById('output').setAttribute('style', 'display: block')
-    }
-
-    // Creation of directory for the given friend and the Hello message.
     async function create_friend_directory() {
 
-        /**
-         * Does two things:
-         * 1. Adds the IPFS address of the peer to the bootstrap list
-         * 2. Creates a folder for the friend and adds the hello message
-         */
-        
-        // TODO: Improve error handling
+        // Extract the contents of the submission
+        var friend_peer_id = document.getElementById("add-friend-id").value;
 
-        const friend_peerID = document.getElementById('friend_peerID').value
-        
-        /**
-        const profile = await db.get(friend_peerID)
-        const friend_address = profile['0']['address']
-         */
-        
-        const friend_address = '/p2p-circuit/ipfs/QmXqXZKMC5J6um1q8mQXuRB2L83FdFdr2MJEhbd4UDAdkG'
-        
-        // First add friend to bootstrap list
-        const res = await node.bootstrap.add(friend_address)  // Check for errors?
-        console.log(res.Peers)
-
-        // Also store the friend's multiaddr
-        friend_multiaddr_list.push(friend_address)
-
-        // Next create the folder for the friend and add hello message.
-        const directory = '/root_folder/' + friend_peerID;
-
-        await node.files.mkdir(directory).catch((err) => {
-            console.log("Directory for this friend has already been created!");
+        // Ensure the fields weren't empty on submission
+        if (!(friend_peer_id)) {
+            alert("Please enter a value before submitting.");
             return;
-        });
+        }
 
-        /** TODO: create a shared-secret key, which is then encrypted with the friend's public key.
-            Place this final output in the hello_message constant declared below. For now, it is 
-            hardcoded to be the friend's peerID.
-        */
+        // TODO: this should perform search_peer_directory. If it fails, should perform
+        // createFriendDirectory() 
+        const success = await utils.createFriendDirectory(node, db, friend_peer_id);
 
-        // Getting the friend's public key from the DB
-        // console.log(profile['0']['public_key'])  // prints friend's public key
- 
-        const hello_message = friend_peerID;  // Replace peerID with shared-secret
+        if(success) {
+            friend_multiaddr_list.push('/p2p-circuit/ipfs/' + friend_peer_id);
+            alert("Friend added.");
+        }
 
-        // TODO: encrypt above with friend's public key that we obtained
-        // For now storing unencrypted message
-        const final_message = hello_message;
-        const file_path = '/root_folder/' + friend_peerID + '/hello.txt';
-        const files_added = await node.add({ path: file_path, content: final_message }); // This won't fail,
-                                                                                         // no need to catch err
+        else {
+            alert("An error occured. Could not add friend.");
+        }
 
-        console.log('Created Hello message file: ', files_added[0].path, files_added[0].hash)
-        const fileBuffer = await node.cat(files_added[0].hash)
-        console.log('Contents of Hello message file:', fileBuffer.toString())
-
-        // Open connection to existing orbitDB database
-        const db = await orbitdb.open('/orbitdb/Qmd8TmZrWASypEp4Er9tgWP4kCNQnW4ncSnvjvyHQ3EVSU/first-database')
-        await db.load()  // load locally persisted data
-        
-        console.log('The address of the orbit-db is: ' + db.address.toString())
-
-        const profile = await db.get('QmXqXZKMC5J6um1q8mQXuRB2L83FdFdr2MJEhbd4UDAdkG')
-        console.log(profile)
-        
-        // Update root folder hash in the DB
-        const root = await node.files.stat('/root_folder');
-        await update_DB(root.hash)
     }
     
-    // Search in a peer's directory for your records. Run the create_friend_directory first,
-    // so that the peer has been added to your bootstrap list and you are connected to them.
-    async function search_peer_directory () {
 
-        const peer_peerID = document.getElementById('peer_peerID').value
+    // Search in a peer's directory for your records. Run the create_friend_directory first,
+    // so that the peer has been added to your bootstrap list and you are connected to them. 
+    async function search_peer_directory() {
+
+        const peer_peerID = document.getElementById('peer_peerID').value;
+        await utils.searchPeerDirectory(node, db);
+        
+    }
+
+    async function write_personal_post() { 
+
+        // Extract the contents of the submission
+        var friend_peer_id = document.getElementById("write-friend-post-id").value;
+        var friend_post_content = document.getElementById("write-friend-post-content").value;
+        var friend_post_filename = document.getElementById("write-friend-post-filename").value;
+
+        // Ensure the fields weren't empty on submission
+        if (!(friend_peer_id) || !(friend_post_content) || !(friend_post_filename)) {
+            alert("Please enter all values before submitting.");
+            return;
+        }
+
+        // Write the post. TODO: move to utils
+        let flag = false;
+        const file_path = '/root_folder/' + friend_peer_id + '/personal_post/' + friend_post_filename + '.txt';
+        await node.files.write(file_path, encrypted_post, { create: true }).catch((err) => {
+
+            alert('Unable to create personal post to friend!');
+            flag = true;
+
+        });
+    
+        if (flag) {
+            return;
+        }
+    
+        // Update root folder hash in the DB
+        await utils.updateDB(node, db);
+
+        alert("Personal post has been written");
+    }
+
+    async function read_personal_post() {
+    
+        // Extract the submitted value
+        var friend_peer_id = document.getElementById("view-friend-posts-id").value;
+
+        // Ensure the form wasn't empty on submission
+        if (!(friend_peer_id)) {
+            alert("Please enter a value before submitting.");
+            return;
+        }
+
+        // Getting our peerID
+        const nodeDetails = await Promise.resolve(node.id());
+        const myPeerId = nodeDetails.id;
+    
+        // TODO: Move to utils
+        
+        // Querying database for this peer's root folder hash
+        const profile = await db.get(peer_peerID)
+
+        if (!(profile && profile.length)) 
+        {   
+            console.log('Could not find friend\'s details in DB. Cannot add friend!');
+            return false;
+        }
+        
+        const rootHash = profile['0']['root_hash']
+
+        const file_path = '/ipfs/' + rootHash + '/' + myPeerId + '/personal_post/';
+    
+        const files = await node.files.ls(file_path);
+    
+        files.forEach(async(file) => {
+
+            console.log(file);
+
+            if (file.type == 0) {
+
+                const buf = await node.files.read(file_path + '' + file.name);
+                const post = buf.toString('utf8');
+
+                // TODO: add to HTML instead of console.log()
+                console.log(post);
+
+            }
+    
+        });
+
+        // Display the requested friend's posts list
+        document.getElementById('friend-posts-list').style.display = 'block';
+    }
+    
+    // Function to write a post into the Group Posts
+    async function write_group_post() {
+        
+        // Extract the contents of the submission
+        var group_post_content = document.getElementById("write-friend-post-content").value;
+        var group_post_filename = document.getElementById("write-friend-post-filename").value;
+
+        // Ensure the fields weren't empty on submission
+        if (!(group_post_content) || !(group_post_filename)) {
+            alert("Please enter all values before submitting.");
+            return;
+        }
+
+        // Place the post in the Group. TODO: Add to utils 
+        const file_path = '/root_folder/group/' + group_post_filename;
+        const file_added = await node.files.write(file_path, group_post_content, { create: true });
+
+        // Update root folder hash in the DB
+        await utils.updateDB(node, db);
+
+        // Write the post
+        alert("Group post has been written");
+
+    }
+
+    // Function to read the posts within the Group folder
+    async function read_group_post() {
+
+        // Extract the contents of the submission
+        var friend_peer_id = document.getElementById("read-group-posts-id").value;
+
+        // Ensure the fields weren't empty on submission
+        if (!(friend_peer_id)) {
+            alert("Please enter all values before submitting.");
+            return;
+        }
+
+        // TODO: Move to utils
+
+        // THE FOLDER CONTAINING GROUP POSTS IS CALLED 'group'
+
+        // Use the Group Key to decrypt the contents of the Group Posts
+        let file_path = '/ipfs/' + friend_root_hash + '/group/';
+        const files = await node.files.ls(file_path);
+
+        files.forEach(async(file) => {
+
+            console.log(file);
+            if (file.type == 0) {
+
+                const buf = await node.files.read('/root_folder/group/' + file.name);
+
+                // TODO: add to HTML instead of console.log()
+                console.log(buf.toString('utf8'));
+            }
+
+        });
+
+        document.getElementById('group-posts-list').style.display = 'block';
+    }
+
+    async function open_chat() {
+
+        // TODO: move to utils
+        var e = document.getElementById('Chat-Window');
 
         // Getting our peerID
         const nodeDetails = await Promise.resolve(node.id());
         const myPeerId = nodeDetails.id;
 
-        // Querying database for this peer's root folder hash
-        const profile = await db.get(peer_peerID)
-        const root_hash = profile['0']['root_hash']
+        const username = myPeerId;
 
-        // Full IPFS path of the hello message
-        const helloMessagePath = '/ipfs/' + root_hash + '/' + myPeerId + '/hello.txt';
+        // Extract the contents of the submission
+        var channel = document.getElementById("chat-channel").value;
 
-        // Read the contents of the Hello message, if it exists.
-        const secretMessage = (await node.files.read(helloMessagePath)).toString('utf8')
-        .catch((err) => {
-            console.log('Either\n1. the peer node isn\'t online')
-            console.log('2. Peer node is online but you are not connected to them')
-            console.log('3. Peer node has not set up their root folder')
-            console.log('4. The peer node has not created the directory for you')
+        // Ensure the fields weren't empty on submission
+        if (!(channel)) {
+            alert("Please enter all values before submitting.")
             return;
-        });
-
-        // The secretMessage should contain the shared-secret encrypted with my public key.
-        // TODO: decrypt this secret message using my private key. Then store this shared-secret
-        // in the keystore
-
-        console.log(secretMessage);
-
-        // Update root folder hash in the DB (currently not needed here)
-        const root = await node.files.stat('/root_folder');
-        await update_DB(root.hash)
-    }
-
-    async function open_chat () {
-
-        /** 
-         * First, check for online and offline friends. This is done by
-         * checking the list of our friend multiaddresses, 
-         * and checking if each friend is present in our swarm peers.
-         * Ideally should be repeated periodically
-         * */ 
-
-        // Get the swarm peers
-        const swarm_peers = await node.swarm.peers()
-
-        /**
-         * Two ways of checking for online/offline friends:
-         * 1. For each multiaddr in friend_multiaddr_list, loop through
-         *    the entire list of swarm peers and check if the multiaddr is present.
-         * 2. For each multiaddr in friend_multiaddr_list, swarm connect to 
-         *    that address, and check the response. This'll be slower than looping 
-         *    through the bootstrap list, which won't usually get larger than hundreds of lines
-        */
-
-        
-        let offline_friends = []
-        let online_friends = []
-
-        console.log(swarm_peers['5'].addr.toString())
-        for (const friend_multiaddr of friend_multiaddr_list) {
-            let flag = 0
-            for (const swarm_peer of swarm_peers) {
-                console.log(swarm_peer.addr.toString())
-                if(swarm_peer['addr']['buffer'].toString() == friend_multiaddr) {
-                    online_friends.push(friend_multiaddr)
-                    flag = 1
-                    break
-                }
-            }
-
-            if(!flag) {
-                offline_friends.push(friend_multiaddr)
-            }
         }
 
-        // Display list of online and offline friends
-        document.getElementById('offline_friends').innerText = offline_friends
-        document.getElementById('online_friends').innerText = online_friends
-        document.getElementById('chat').setAttribute('style', 'display: block')
+        // Connect to the channel and open the chat window
 
-        /** 
-        // Joining orbit chat
-        const username = 'krithik'
-        const channel = 'HelloWorld'
+        display("Chat-Body");
 
         orbit.events.on('connected', () => {
-            console.log('-!- Orbit Chat connected')
+            console.log(`Connected`)
             orbit.join(channel)
         })
 
-        orbit.events.on('joined', channelName => {
-            orbit.send(channelName, '/me is now caching this channel')
+        // After joining the joined message should come
+        orbit.events.on('joined', async channelName => {
+            
+            e.innerHTML += "Joined #" + channelName + "<br>"
             console.log(`-!- Joined #${channelName}`)
         })
 
-        // Listen for new messages
-        orbit.events.on('entry', (entry, channelName) => {
+        // LISTEN FOR MESSAGES
+        orbit.events.on('entry', (entry,channelName) => {
+
             const post = entry.payload.value
             console.log(`[${post.meta.ts}] &lt;${post.meta.from.name}&gt; ${post.content}`)
-        })
+            e.innerHTML += (`${post.meta.from.name}: ${post.content}` + "<br>")
 
-        // Connect to Orbit network
-        orbit.connect(username).catch(e => console.error(e))
-        */
+        });
+        
+        // SEND A MESSAGE EVERYTIME SEND BUTTON IS CLICKED
+        document.getElementById("send-message-btn").onclick = async() => {
+
+            // Extract the contents of the submission
+            var channel_message = document.getElementById("chat-message").value;
+            
+            // Ensure the fields weren't empty on submission
+            if (!(channel_message)) {
+                alert("Please enter a message!");
+                return;
+            }
+
+            await orbit.send(channel, channel_message)
+            // Send the message and display it on the window
+            alert("Message sent");
+
+        }
+        
+        orbit.connect(username).catch(e => console.error(e));
+
     }
+
+    // TODO: add to utils
+    function display(idToBeDisplayed) {
+        document.getElementById('Home').style.display = 'none';
+        document.getElementById('Profile').style.display = 'none';
+        document.getElementById('Friend-Posts').style.display = 'none';
+        document.getElementById('Group-Posts').style.display = 'none';
+        document.getElementById('Chat').style.display = 'none';
+        document.getElementById('Chat-Body').style.display = 'none';
     
-    document.getElementById('create_root_folder').onclick = create_root_folder  
-    document.getElementById('add_details_to_DB').onclick = add_details_to_DB  
-    document.getElementById('store').onclick = store
-    document.getElementById('data_to_public_profile').onclick = add_data_to_public_profile
-    document.getElementById('create_friend_directory').onclick = create_friend_directory
-    document.getElementById('search_peer_directory').onclick = search_peer_directory
-    document.getElementById('open_chat').onclick = open_chat
+        document.getElementById(idToBeDisplayed).style.display = 'block';
+    }
+
+    // Display the Profile Page
+    document.getElementById("profile-btn").onclick = () => {
+
+        // Display the requested section
+        display("Profile");
+    }
+
+    // Display the Friend Posts Page
+    document.getElementById("friends-posts-btn").onclick = () => {
+
+        // Display the requested section
+        display("Friend-Posts");
+    }
+
+    // Display the Group Posts Page
+    document.getElementById("group-posts-btn").onclick = () => {
+
+        // Display the requested section
+        display("Group-Posts");
+    }
+
+    // Display Chat Page
+    document.getElementById("start-a-chat-btn").onclick = () => {
+
+        // Display the requested section
+        display("Chat");
+    }
+
+    document.getElementById("add-friend-btn").onclick = create_friend_directory;
+    
+    document.getElementById('save-to-profile-btn').onclick = add_data_to_public_profile;
+    document.getElementById("read-public-posts-btn").onclick = read_public_posts;
+
+    document.getElementById("write-friend-post-btn").onclick = write_personal_post;
+    document.getElementById("view-friend-posts-btn").onclick = read_personal_post;
+
+    document.getElementById("write-group-post-btn").onclick = write_group_post;
+    document.getElementById("view-group-posts-btn").onclick = read_group_post;
+
+    // document.getElementById('search_peer_directory').onclick = search_peer_directory;
+    document.getElementById('connect-to-channel-btn').onclick = open_chat;
+
 })
