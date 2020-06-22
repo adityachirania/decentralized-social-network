@@ -1,4 +1,3 @@
-const mfs = require('ipfs-mfs');
 
 async function createNode(IPFS) {
 
@@ -27,7 +26,7 @@ async function createRootFolder(node) {
     return true;
 }
 
-async function addDetailsToDB(node, db) {
+async function addDetailsToDB(node, db, username) {
 
     // Getting our peerID
     const nodeDetails = await Promise.resolve(node.id())
@@ -49,7 +48,7 @@ async function addDetailsToDB(node, db) {
      */
 
     // Add our data to DB.
-    db.put({ '_id': myPeerId, public_key: 'test', root_hash: root.hash, multiaddr: '/p2p-circuit/ipfs/' + myPeerId })
+    await db.put({ '_id': myPeerId, public_key: 'test', root_hash: root.hash, multiaddr: '/p2p-circuit/ipfs/' + myPeerId, username: username })
 }
 
 async function connectToDB(node, OrbitDB) {
@@ -57,10 +56,25 @@ async function connectToDB(node, OrbitDB) {
     // Create OrbitDB instance
     const orbitdb = await OrbitDB.createInstance(node);
 
-    // Connect to the previously created users_db1
-    const db = await orbitdb.open('/orbitdb/zdpuB2Gu6EgrD86FzKMYpKbaj8TdH9q4RgyEBKmawBeWtRVXT/users_db1');
+    const options = {
+        // Give write access to everyone
+        accessController: {
+            write: ['*'],
+        },
+        // indexBy: 'peerID',
+        pin: true
+    };
+
+    // Create / Open a database
+    const db = await orbitdb.docs("users_database4", options);
+
     // Load locally persisted data
     await db.load();
+
+    // // Listen for updates from peers
+    // db.events.on("replicated", address => {
+    //     console.log(db.iterator({ limit: -1 }).collect());
+    // });
 
     /**
      * To make sure Orbit-DB is fully replicated before user makes changes:
@@ -81,11 +95,11 @@ async function createDB(node, OrbitDB) {
         accessController: {
             write: ['*'],
         },
-        indexBy: 'peerID',
+        // indexBy: 'peerID',
         pin: true
     };
 
-    const db = await orbitdb.docs('users_db', options);
+    const db = await orbitdb.docs('users_db9', options);
 
     return db;
 }
@@ -99,21 +113,26 @@ async function connectToChat(node, Orbit) {
 
 async function loadFriendsList(node, isNewProfile) {
 
-    if(isNewProfile)
-    {
-        const files_added = await node.files.write('/root_folder/friends_list.txt', Buffer.from(''), { create: true })
-        console.log('Created friends list file');
-    }
-
     // MFS path of the local friends list file
     const friendsListPath = '/root_folder/friends_list.txt';
 
-    const str = (await node.files.read(friendsListPath)).toString('utf8')
+    let flag = false;
+    await (node.files.read(friendsListPath)).catch((err) => {
+        console.log('Creating friends list file...');
+        flag = true;
+    });
+
+    if (flag) {
+        await node.files.write('/root_folder/friends_list.txt', Buffer.from(''), { create: true })
+        console.log('Created friends list file');
+    }
+
+    let str = (await node.files.read(friendsListPath)).toString('utf8')
     console.log(str)
 
-    const friend_list = str.split("\n");
+    let friend_list = str.split("\n");
     
-    return friend_list;
+    return friend_list.slice(0, -1);
 
 }
 

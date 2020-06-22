@@ -1,4 +1,3 @@
-const mfs = require('ipfs-mfs');
 
 async function updateDB(node, db) {
     
@@ -10,12 +9,12 @@ async function updateDB(node, db) {
     const new_root_hash = await node.files.stat('/root_folder');
 
     let record = await db.get(myPeerId);
-    record.root_hash = new_root_hash.hash;
-    
+    record[0].root_hash = new_root_hash.hash;
+
     console.log('New root folder hash is: ' + new_root_hash.hash);
 
     // Update the DB.
-    db.put(record)
+    db.put(record[0])
     .then(() => db.get(myPeerId))
     .then((value) => {
         console.log('The DB has been updated with the new root folder hash');
@@ -26,15 +25,21 @@ async function updateDB(node, db) {
 
 async function addDataToPublicProfile(node, db, filename, filedata) {
 
-    const files_added = await node.files.write('/root_folder/public/' + filename, filedata, { create: true }).catch((err) => {
-        console.log('Could not create file in public profile! Error: ' + err);
-        return;
+    let alert_data = "";
+    let flag = false;
+    await node.files.write('/root_folder/public_profile/' + filename, Buffer.from(filedata), { create: true }).catch((err) => {
+        alert_data = 'Could not create file in public profile! Error: ' + err;
+        flag = true;
     });
 
-    console.log('Added file to your public profile successfully!');
+    if (flag) return alert_data;
+
+    alert_data = 'Added file \"' + filename + '\" to your public profile successfully!';
 
     // Update root folder hash in DB
     await updateDB(node, db);
+
+    return alert_data;
 
 }
 
@@ -51,18 +56,19 @@ async function createFriendDirectory(node, db, friend_peerID) {
     // TODO: Improve error handling
 
     // Get friend's p2p-circuit address from DB
+    let alert_data = "";
     const profile = await db.get(friend_peerID)
 
     if (!(profile && profile.length)) 
     {   
-        console.log('Could not find friend\'s details in DB. Cannot add friend!');
-        return false;
+        alert_data = 'Could not find friend\'s details in DB. Cannot add friend!';
+        return alert_data;
     }
     
-    const friend_address = profile['0']['address']
+    const friend_address = profile['0']['multiaddr']
 
     // First add friend to bootstrap list
-    const res = await node.bootstrap.add(friend_address)
+    await node.bootstrap.add(friend_address)
     console.log('Added friend to bootstrap list!');
 
     // Next create the folder for the friend and add hello message.
@@ -74,8 +80,6 @@ async function createFriendDirectory(node, db, friend_peerID) {
         flag = true;
     });
 
-    if(flag) return false;
-
     /** TODO: create a shared-secret key, which is then encrypted with the friend's public key.
         Place this final output in the hello_message constant declared below. For now, it is 
         hardcoded to be the friend's peerID.
@@ -85,41 +89,61 @@ async function createFriendDirectory(node, db, friend_peerID) {
     // console.log(profile['0']['public_key']);
 
     const hello_message = friend_peerID; // Replace peerID with shared-secret
-
+    
     // TODO: encrypt above with friend's public key that we obtained
     // For now storing unencrypted message
     const final_message = hello_message;
     const file_path = '/root_folder/' + friend_peerID + '/hello.txt';
 
     flag = false;
-    await node.files.write(file_path, final_message, { create: true }).catch((err) => {
-        // This error should never be encountered
-        console.log('Unable to write hello message to file! Cannot add friend.');
-        console.log(err)
+    await node.files.write(file_path, Buffer.from(final_message), { create: true }).catch((err) => {
+        alert_data = 'Unable to write hello message to file! Cannot add friend.\nError: ';
+        alert_data += err;
         flag = true;
     });
 
-    if (flag) return false;
+    if (flag) return alert_data;
 
     // Now add friend multiaddr to our /root_folder/friends_list.txt
     const friendsListPath = '/root_folder/friends_list.txt';
+
+    flag = false;
+    await (node.files.read(friendsListPath)).catch((err) => {
+        console.log('Creating friends list file...');
+        flag = true;
+    });
+
+    if (flag) {
+        await node.files.write(friendsListPath, "", { create: true }); 
+    }
 
     let str = (await node.files.read(friendsListPath)).toString('utf8');
     str = str + '/p2p-circuit/ipfs/' + friend_peerID + '\n';
 
     await node.files.rm('/root_folder/friends_list.txt');  // Not reqd
-    await node.files.write('/root_folder/friends_list.txt', Buffer.from(str));
-    console.log('Successfully updated friends list file!');
+    await node.files.write('/root_folder/friends_list.txt', Buffer.from(str), { create: true });
+
+    alert_data = 'Successfully updated friends list file!';
 
     // Update root folder hash in the DB
     await updateDB(node, db);
     
-    return true;
+    return alert_data;
 }
 
 // Search in a peer's directory for your records. Run the create_friend_directory first,
 // so that the peer has been added to your bootstrap list and you are connected to them.
-async function searchPeerDirectory(node, db) {
+async function searchPeerDirectory(node, db, peer_peerID, multiaddr) {
+
+    // Check if the peer is already a friend.
+    let peer_address = '/p2p-circuit/ipfs/' + peer_peerID;
+    const bootstrap_list = await node.bootstrap.list()
+    for (let i = 0; i < bootstrap_list["Peers"].length; i++) {
+        let p2p_circuit_addr = bootstrap_list["Peers"][i];
+        if (p2p_circuit_addr == peer_address) {
+            return "This peer is already your friend!";
+        }
+    }
 
     // Getting our peerID
     const nodeDetails = await Promise.resolve(node.id());
@@ -129,11 +153,18 @@ async function searchPeerDirectory(node, db) {
     const profile = await db.get(peer_peerID)
 
     if (!(profile && profile.length)) 
-    {   
-        console.log('Could not find friend\'s details in DB. Cannot add friend!');
-        return false;
-    }
+        return 'Could not find friend\'s details in orbit DB. Cannot add friend!';
     
+
+    // First add friend to bootstrap list
+    const friend_address = profile['0']['multiaddr'];
+
+    await node.bootstrap.add(friend_address);
+    console.log ("Added friend to bootstrap list!");
+
+    // Try to connect to them
+    await node.swarm.connect(friend_address);
+
     const root_hash = profile['0']['root_hash']
 
     // Full IPFS path of the hello message
@@ -141,30 +172,94 @@ async function searchPeerDirectory(node, db) {
 
     // Read the contents of the Hello message, if it exists.
     let flag = false;
-    
-    const secretMessage = (await node.files.read(helloMessagePath)).toString('utf8')
+    let alert_message = "";
+
+    const temp = await node.files.read(helloMessagePath)
         .catch((err) => {
-            console.log('Either\n1. the peer node isn\'t online')
-            console.log('2. Peer node is online but you are not connected to them')
-            console.log('3. Peer node has not set up their root folder')
-            console.log('4. The peer node has not created the directory for you')
+            alert_message = 'Either\n1. The peer node isn\'t online\n';
+            alert_message += '2. Peer node is online but you are not connected to them\n';
+            alert_message += '3. Peer node has not set up their root folder\n';
+            alert_message += '4. The peer node has not created the directory for you\n\n';
+            alert_message += 'Could not add this peer as a friend!';
             flag = true;
         });
+    
+    if (flag) {
+        try {
+            await node.bootstrap.rm (friend_address);
+            console.log ("Removed friend from bootstrap list!");
+        }
+        catch (err) {
 
-    if (flag) return false;
+        }
+        
+        return alert_message;
+    }
+
+    const secretMessage = temp.toString('utf8');
     
     // The secretMessage should contain the shared-secret encrypted with my public key.
     // TODO: decrypt this secret message using my private key. Then store this shared-secret
     // in the keystore
 
     console.log(secretMessage);
+
+    friend_multiaddr_list.push(friend_address);
+
+    const friendsListPath = '/root_folder/friends_list.txt';
+
+    flag = false;
+    await (node.files.read(friendsListPath)).catch((err) => {
+        console.log('Creating friends list file...');
+        flag = true;
+    });
+
+    if (flag) {
+        await node.files.write(friendsListPath, "", { create: true }); 
+    }
+
+    let str = (await node.files.read(friendsListPath)).toString('utf8');
+    str = str + '' + friend_address + '\n';
+
+    await node.files.rm('/root_folder/friends_list.txt');  // Not reqd
+    await node.files.write('/root_folder/friends_list.txt', Buffer.from(str), { create: true });
     
     await updateDB(node, db);
-    return true;
+
+    return "Friend added successfully!";
 }
 
+async function writePersonalPost (node, db, friend_peer_id, personal_post_content, personal_post_filename) {
+
+    await node.files.mkdir('/root_folder/' + friend_peer_id).catch((err) => {
+
+    });
+
+    await node.files.mkdir('/root_folder/' + friend_peer_id + '/personal_post').catch((err) => {
+
+    });
+
+    // Write the post. TODO: move to utils
+    let flag = false;
+    const file_path = '/root_folder/' + friend_peer_id + '/personal_post/' + personal_post_filename;
+    await node.files.write(file_path, Buffer.from(personal_post_content), { create: true }).catch((err) => {
+
+        alert('Unable to create personal post to friend!' + err);
+        flag = true;
+
+    });
+
+    if (flag) return;
+
+    // Update root folder hash in the DB
+    await updateDB(node, db);
+
+    alert("Personal post to " + friend_peer_id + " has been written!");
+
+}
 
 module.exports.updateDB = updateDB;
 module.exports.addDataToPublicProfile = addDataToPublicProfile;
 module.exports.createFriendDirectory = createFriendDirectory;
 module.exports.searchPeerDirectory = searchPeerDirectory;
+module.exports.writePersonalPost = writePersonalPost;
